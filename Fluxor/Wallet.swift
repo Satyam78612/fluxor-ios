@@ -48,7 +48,7 @@ struct ChainRegistry {
         143:   .init(id: 143,   name: "Monad",       icon: "monad",         explorerBaseUrl: "https://monadscan.com/tx/"),
         999:   .init(id: 999,   name: "HyperEVM", icon: "hyperevm",   explorerBaseUrl: "https://hyperevmscan.io/tx/"),
         196:   .init(id: 196,   name: "X Layer",     icon: "xlayer",        explorerBaseUrl: "https://www.oklink.com/x-layer/tx/"),
-        4200:  .init(id: 4200,  name: "Merlin",      icon: "merlinchain",        explorerBaseUrl: "https://scan.merlinchain.io/tx/"),
+        4200:  .init(id: 4200,  name: "Merlin",      icon: "merlin",        explorerBaseUrl: "https://scan.merlinchain.io/tx/"),
         9745:  .init(id: 9745,  name: "Plasma",      icon: "plasma",        explorerBaseUrl: "https://plasmascan.to/tx/"),
         59144: .init(id: 59144, name: "Linea",       icon: "lineachain",         explorerBaseUrl: "https://lineascan.build/tx/"),
         146:   .init(id: 146,   name: "Sonic",       icon: "sonic",        explorerBaseUrl: "https://sonicscan.org/tx/"),
@@ -220,332 +220,126 @@ struct WalletAsset: Identifiable, Hashable {
     }
 }
 
-struct PortfolioResponse: Codable {
-    let totalUsd: Double
-    let tokens: [BackendToken]
-}
+// MARK: - 4. VIEW MODEL
 
-struct BackendToken: Codable {
-    let id: String
-    let chainId: Int
-    let chainName: String
-    let address: String
-    let symbol: String
-    let name: String
-    let amount: Double
-    let price: Double
-    let valueUsd: Double
-    let logo: String?
-    let isNative: Bool
-}
-
-// MARK: - 2. View Model
-
-@MainActor
 class WalletViewModel: ObservableObject {
-    
-    // MARK: - Published Properties
     @Published var assets: [WalletAsset] = []
     @Published var transactions: [WalletTransaction] = []
-    @Published var totalBalance: Double = 0.0
-    @Published var todayPNL: Double = 0.0
-    @Published var todayPNLPercent: Double = 0.0
-    @Published var isLoading: Bool = false
     
-    // MARK: - Internal Properties
     private var evmAddress: String = ""
     private var solanaAddress: String = ""
     
-    // Backend Endpoints
-    // Replace with your actual Render URL
-    private let baseURL = "https://fluxor-backend-ouwq.onrender.com/api"
-    
-    // MARK: - Init
     init() {
-        // 1. Get Addresses (In production, get these from Particle Connect SDK)
-        self.evmAddress = "0x59714dE56e030071Bf96c7f7Ce500c05476f2C88"
-        self.solanaAddress = "AoD9S5nuShfM5vgh9XvbR6mG1CxmkP3DNhiQX2izV4Ze"
-        
-        // 2. Load Data
-        fetchTransactions() // Load history (Mock or API)
-        
-        Task {
-            await loadPortfolio()
-        }
-    }
-    
-    // MARK: - Data Fetching
-    
-    func loadPortfolio() async {
-        self.isLoading = true
-        
-        // Step 1: Fetch "Fast Lane" (Primary Assets like ETH, USDC)
-        // This gives the user immediate feedback
-        await fetchPortfolio(endpoint: "/portfolio/primary")
-        
-        // Step 2: Fetch "Full Portfolio" (Everything else)
-        // This runs in the background and updates the list
-        await fetchPortfolio(endpoint: "/portfolio/full")
-        
-        self.isLoading = false
-    }
-    
-    private func fetchPortfolio(endpoint: String) async {
-        guard let url = URL(string: "\(baseURL)\(endpoint)?address=\(evmAddress)") else { return }
-        
-        do {
-            let (data, _) = try await URLSession.shared.data(from: url)
-            let response = try JSONDecoder().decode(PortfolioResponse.self, from: data)
-            
-            // Update UI
-            self.totalBalance = response.totalUsd
-            self.assets = processBackendTokens(response.tokens)
-            
-            // Calculate PnL (Mock logic for now, or fetch from backend)
-            self.calculateMockPnL()
-            
-        } catch {
-            print("❌ Portfolio Fetch Error [\(endpoint)]: \(error)")
-        }
-    }
-    
-    // MARK: - Core Logic: Grouping Tokens
-    // Converts flat list (USDC on Base, USDC on Eth) -> Unified Asset (USDC)
-    private func processBackendTokens(_ backendTokens: [BackendToken]) -> [WalletAsset] {
-        var assetMap: [String: WalletAsset] = [:]
-        
-        for token in backendTokens {
-            let symbol = token.symbol.uppercased()
-            
-            // Create the Network Object for this specific token instance
-            let config = ChainRegistry.get(id: token.chainId)
-            let network = CryptoNetwork(
-                name: config.name,
-                chainId: config.id,
-                icon: config.icon,
-                depositAddress: (token.chainId == 101) ? solanaAddress : evmAddress
-            )
-            
-            if let existingAsset = assetMap[symbol] {
-                // Update Existing Asset (Add balance & Network)
-                let newAmount = existingAsset.amount + token.amount
-                let newValue = existingAsset.value + token.valueUsd
-                
-                // Add Network
-                var currentNetworks = existingAsset.networks
-                if !currentNetworks.contains(where: { $0.id == network.id }) {
-                    currentNetworks.append(network)
-                }
-                
-                // Update Chain Specific Balance
-                var currentChainBalances = existingAsset.chainSpecificBalances
-                currentChainBalances[token.chainId] = (currentChainBalances[token.chainId] ?? 0) + token.amount
-                
-                // Save back
-                assetMap[symbol] = WalletAsset(
-                    icon: existingAsset.icon,
-                    name: existingAsset.name,
-                    symbol: existingAsset.symbol,
-                    amount: newAmount,
-                    value: newValue,
-                    dayChangeUSD: existingAsset.dayChangeUSD, // Backend needs to provide this
-                    isStock: existingAsset.isStock,
-                    networks: currentNetworks.sorted { $0.id < $1.id },
-                    chainSpecificBalances: currentChainBalances
-                )
-                
-            } else {
-                // Create New Asset
-                assetMap[symbol] = WalletAsset(
-                    icon: getImageName(for: symbol), // Helper to map "ETH" -> local asset name
-                    name: token.name,
-                    symbol: symbol,
-                    amount: token.amount,
-                    value: token.valueUsd,
-                    dayChangeUSD: 0, // Placeholder
-                    isStock: false,
-                    networks: [network],
-                    chainSpecificBalances: [token.chainId: token.amount]
-                )
-            }
-        }
-        
-        // Convert Map to Array and Sort by Value
-        return Array(assetMap.values).sorted { $0.value > $1.value }
-    }
-    
-    // MARK: - Helpers
-    
-    private func calculateMockPnL() {
-        // In a real app, backend sends 24h change. Here we mock it based on balance.
-        let randomPercent = Double.random(in: -2.0...5.0)
-        self.todayPNL = (totalBalance * randomPercent) / 100
-        self.todayPNLPercent = randomPercent
+        fetchUserAccount()
+        fetchTransactions()
     }
     
     func getAddress(for chainId: Int) -> String {
-        return (chainId == 101) ? solanaAddress : evmAddress
+        if chainId == 101 { return solanaAddress } else { return evmAddress }
     }
     
-    private func getImageName(for symbol: String) -> String {
-        switch symbol {
-        case "ETH": return "eth"
-        case "BTC": return "btc"
-        case "SOL": return "sol"
-        case "USDC": return "usdc"
-        case "USDT": return "usdt"
-        case "BNB": return "bnb"
-        case "AVAX": return "avax"
-        default: return "circle.dashed" // Fallback icon
+    func makeNetworks(_ ids: [Int]) -> [CryptoNetwork] {
+        return ids.map { id in
+            let config = ChainRegistry.get(id: id)
+            return CryptoNetwork(
+                name: config.name,
+                chainId: config.id,
+                icon: config.icon,
+                depositAddress: getAddress(for: id)
+            )
         }
     }
     
     func fetchTransactions() {
-        // Mock Transactions - Replace with API call to /api/transactions later
-        self.transactions = [
-            WalletTransaction(
-                type: .received,
-                symbol: "ETH",
-                status: "Success",
-                date: "2025-01-15T10:00:00Z",
-                mainAmount: "+0.5 ETH",
-                price: nil, buyAmount: "+0.5 ETH", sellAmount: nil,
-                gasFee: "$0.45", networkChainId: 1, appFee: "",
-                address: "0x123...abc", targetTx: nil, settlementTx: nil, sourceTxs: []
-            ),
-            WalletTransaction(
-                type: .sent,
-                symbol: "USDC",
-                status: "Success",
-                date: "2025-01-14T18:30:00Z",
-                mainAmount: "-50.00 USDC",
-                price: nil, buyAmount: nil, sellAmount: "-50.00 USDC",
-                gasFee: "$0.01", networkChainId: 8453, appFee: "",
-                address: "0x987...xyz", targetTx: nil, settlementTx: nil, sourceTxs: []
-            )
+            self.transactions = [
+                WalletTransaction(
+                    type: .sent, symbol: "SOL", status: "Success", date: "8/12/25, 9:09 PM",
+                    mainAmount: "-0.01473 SOL", price: nil, buyAmount: nil, sellAmount: "-0.01473 SOL",
+                    gasFee: "$0.0005", networkChainId: 101, appFee: "",
+                    address: "0x59714dE56e030071Bf96c7f7Ce500c05476f2C88",
+                    targetTx: WalletTxInfo(chainId: 101, txHash: "E1PsV6X4ntLR7Vxg8rHEXevZ3rVqgy1zvSViCXf7MdjJj2WmnZ5QdBZwXs532RFc2KMbezTtfh8zHbLuKXNVHNN"),
+                    settlementTx: WalletTxInfo(chainId: 0, txHash: "0xf0c200811eb068de3a6adcd9d0bc3c66650ac50403f2c1931002c391d14ad56a"),
+                    sourceTxs: []
+                ),
+                WalletTransaction(
+                    type: .received, symbol: "SOL", status: "Success", date: "8/12/25, 7:30 PM",
+                    mainAmount: "+0.01474 SOL", price: nil, buyAmount: "+0.01474 SOL", sellAmount: nil,
+                    gasFee: "$0.0005", networkChainId: 101, appFee: "",
+                    address: "0x59714dE56e030071Bf96c7f7Ce500c05476f2C88",
+                    targetTx: nil,
+                    settlementTx: nil,
+                    sourceTxs: [
+                        WalletTxInfo(chainId: 101, txHash: "E1PsV6X4ntLR7Vxg8rHEXevZ3rVqgy1zvSViCXf7MdjJj2WmnZ5QdBZwXs532RFc2KMbezTtfh8zHbLuKXNVHNN")
+                    ]
+                ),
+                WalletTransaction(
+                    type: .converted, symbol: "USDT", status: "Success", date: "6/02/25, 11:10 AM",
+                    mainAmount: "500 USDC", price: nil, buyAmount: "+500 USDT", sellAmount: "-500 USDC",
+                    gasFee: "$0.10", networkChainId: 10, appFee: "$0.03", address: "",
+                    targetTx: WalletTxInfo(chainId: 10, txHash: "0x4ea4aee4e22d7b1aba7bf63136aba80322c4a417b944b622cc23c2fbe4248880"),
+                    settlementTx: WalletTxInfo(chainId: 0, txHash: "0xf0c200811eb068de3a6adcd9d0bc3c66650ac50403f2c1931002c391d14ad56a"),
+                    sourceTxs: [
+                        WalletTxInfo(chainId: 56, txHash: "0xa09074a6787ec48a404ef79a53b76559f69d34577f0a8aa97c14d99d7d67033c"),
+                        WalletTxInfo(chainId: 42161, txHash: "0x9a2210416f1cc853f9f9842728f2aaa57d1578bec58f9472f33fbbd4e8e9c805")
+                    ]
+                ),
+                WalletTransaction(
+                    type: .received, symbol: "ETH", status: "Success", date: "8/10/25, 7:23 PM",
+                    mainAmount: "+2 ETH", price: nil, buyAmount: "+2 ETH", sellAmount: nil,
+                    gasFee: "$0.59", networkChainId: 1, appFee: "",
+                    address: "0x59714dE56e030071Bf96c7f7Ce500c05476f2C88",
+                    targetTx: nil,
+                    settlementTx: WalletTxInfo(chainId: 0, txHash: "0xf0c200811eb068de3a6adcd9d0bc3c66650ac50403f2c1931002c391d14ad56a"),
+                    sourceTxs: [
+                        WalletTxInfo(chainId: 1, txHash: "0x9a2210416f1cc853f9f9842728f2aaa57d1578bec58f9472f33fbbd4e8e9c805")
+                    ]
+                )
+            ]
+        }
+    
+    func fetchUserAccount() {
+        self.evmAddress = "0x59714dE56e030071Bf96c7f7Ce500c05476f2C88"
+        self.solanaAddress = "AoD9S5nuShfM5vgh9XvbR6mG1CxmkP3DNhiQX2izV4Ze"
+        
+        self.assets = [
+            .init(icon: "usdc", name: "USDC", symbol: "USDC", amount: 25000, value: 25004, dayChangeUSD: 2,
+                  networks: makeNetworks([1, 101, 56, 137, 42161, 10, 8453]),
+                  chainSpecificBalances: [1: 10000, 101: 5000, 56: 5000, 137: 2000, 42161: 1500, 10: 1000, 8453: 503]),
+            
+            .init(icon: "sol", name: "Solana", symbol: "SOL", amount: 150.04, value: 30000, dayChangeUSD: 400,
+                  networks: makeNetworks([101]),
+                  chainSpecificBalances: [101: 150.04]),
+            
+            .init(icon: "btc", name: "Bitcoin", symbol: "BTC", amount: 1.323, value: 39530.24, dayChangeUSD: 800, networks: makeNetworks([101])),
+            .init(icon: "eth", name: "Ethereum", symbol: "ETH", amount: 12.532, value: 37500, dayChangeUSD: 650,networks: makeNetworks([1, 42161, 10, 8453, 59144])),
+            .init(icon: "bnb", name: "BNB", symbol: "BNB", amount: 2221, value: 8800, dayChangeUSD: 120, networks: makeNetworks([56])),
+            .init(icon: "hype", name: "Hyperliquid", symbol: "HYPE", amount: 1205, value: 4200, dayChangeUSD: 38, networks: makeNetworks([999])),
+            .init(icon: "avax", name: "Avalanche", symbol: "AVAX", amount: 12012, value: 3000, dayChangeUSD: 25, networks: makeNetworks([43114])),
+            .init(icon: "dot", name: "Polkadot", symbol: "DOT", amount: 3503, value: 2800, dayChangeUSD: 15, networks: makeNetworks([1])),
+            .init(icon: "uni", name: "Uniswap", symbol: "UNI", amount: 25043, value: 2000, dayChangeUSD: -50, networks: makeNetworks([1])),
+            .init(icon: "aave", name: "Aave", symbol: "AAVE", amount: 22343, value: 2440, dayChangeUSD: -521, networks: makeNetworks([1])),
+            .init(icon: "usdt", name: "Tether", symbol: "USDT", amount: 0.5, value: 0.50, dayChangeUSD: 0, networks: makeNetworks([1, 56, 137, 42161])),
+            .init(icon: "arb", name: "Arbitrum", symbol: "ARB", amount: 5000, value: 5000, dayChangeUSD: 50, networks: makeNetworks([42161])),
+            .init(icon: "op", name: "Optimism", symbol: "OP", amount: 2000, value: 3000, dayChangeUSD: 30, networks: makeNetworks([10])),
+            .init(icon: "matic", name: "Polygon", symbol: "POL", amount: 1000, value: 400, dayChangeUSD: 10, networks: makeNetworks([137])),
+            .init(icon: "mon", name: "Monad", symbol: "MON", amount: 1000, value: 500, dayChangeUSD: 5, networks: makeNetworks([143])),
+            .init(icon: "mnt", name: "Mantle", symbol: "MNT", amount: 594.55, value: 300, dayChangeUSD: 2, networks: makeNetworks([5000])),
+            .init(icon: "linea", name: "Linea", symbol: "LINEA", amount: 32.234, value: 15040, dayChangeUSD: 10, networks: makeNetworks([59144])),
+            .init(icon: "s", name: "Sonic", symbol: "S", amount: 1323130, value: 200, dayChangeUSD: 20, networks: makeNetworks([146])),
+            .init(icon: "bera", name: "Berachain", symbol: "BERA", amount: 586855, value: 2500, dayChangeUSD: 100, networks: makeNetworks([80094])),
+            .init(icon: "okb", name: "X Layer", symbol: "OKB", amount: 2320, value: 1000, dayChangeUSD: 5, networks: makeNetworks([196])),
+            .init(icon: "merlin", name: "Merlin", symbol: "MERL", amount: 2000, value: 1200, dayChangeUSD: 15,  networks: makeNetworks([4200])),
+            .init(icon: "xpl", name: "Plasma", symbol: "PLASMA", amount: 5000, value: 100, dayChangeUSD: 0, networks: makeNetworks([9745])),
+            .init(icon: "tslax", name: "Tesla", symbol: "TSLA", amount: 586855, value: 22200, dayChangeUSD: 100, isStock: true, networks: makeNetworks([80094])),
+            .init(icon: "hoodx", name: "Robinhood", symbol: "HOOD", amount: 2950, value: 12300, dayChangeUSD: 5, isStock: true, networks: makeNetworks([196])),
+            .init(icon: "mstrx", name: "MicroStrategy", symbol: "MSTR", amount: 2000, value: 12000, dayChangeUSD: 15, isStock: true, networks: makeNetworks([4200])),
+            .init(icon: "crclx", name: "Circle", symbol: "CRCL", amount: 5000, value: 10000, dayChangeUSD: 0, isStock: true, networks: makeNetworks([9745]))
+        
         ]
     }
 }
 
-
-//// MARK: - 4. VIEW MODEL
-//
-//class WalletViewModel: ObservableObject {
-//    @Published var assets: [WalletAsset] = []
-//    @Published var transactions: [WalletTransaction] = []
-//    
-//    private var evmAddress: String = ""
-//    private var solanaAddress: String = ""
-//    
-//    init() {
-//        fetchUserAccount()
-//        fetchTransactions()
-//    }
-//    
-//    func getAddress(for chainId: Int) -> String {
-//        if chainId == 101 { return solanaAddress } else { return evmAddress }
-//    }
-//    
-//    func makeNetworks(_ ids: [Int]) -> [CryptoNetwork] {
-//        return ids.map { id in
-//            let config = ChainRegistry.get(id: id)
-//            return CryptoNetwork(
-//                name: config.name,
-//                chainId: config.id,
-//                icon: config.icon,
-//                depositAddress: getAddress(for: id)
-//            )
-//        }
-//    }
-//    
-//    func fetchTransactions() {
-//            self.transactions = [
-//                WalletTransaction(
-//                    type: .sent, symbol: "SOL", status: "Success", date: "8/12/25, 9:09 PM",
-//                    mainAmount: "-0.01473 SOL", price: nil, buyAmount: nil, sellAmount: "-0.01473 SOL",
-//                    gasFee: "$0.0005", networkChainId: 101, appFee: "",
-//                    address: "0x59714dE56e030071Bf96c7f7Ce500c05476f2C88",
-//                    targetTx: WalletTxInfo(chainId: 101, txHash: "E1PsV6X4ntLR7Vxg8rHEXevZ3rVqgy1zvSViCXf7MdjJj2WmnZ5QdBZwXs532RFc2KMbezTtfh8zHbLuKXNVHNN"),
-//                    settlementTx: WalletTxInfo(chainId: 0, txHash: "0xf0c200811eb068de3a6adcd9d0bc3c66650ac50403f2c1931002c391d14ad56a"),
-//                    sourceTxs: []
-//                ),
-//                WalletTransaction(
-//                    type: .received, symbol: "SOL", status: "Success", date: "8/12/25, 7:30 PM",
-//                    mainAmount: "+0.01474 SOL", price: nil, buyAmount: "+0.01474 SOL", sellAmount: nil,
-//                    gasFee: "$0.0005", networkChainId: 101, appFee: "",
-//                    address: "0x59714dE56e030071Bf96c7f7Ce500c05476f2C88",
-//                    targetTx: nil,
-//                    settlementTx: nil,
-//                    sourceTxs: [
-//                        WalletTxInfo(chainId: 101, txHash: "E1PsV6X4ntLR7Vxg8rHEXevZ3rVqgy1zvSViCXf7MdjJj2WmnZ5QdBZwXs532RFc2KMbezTtfh8zHbLuKXNVHNN")
-//                    ]
-//                ),
-//                WalletTransaction(
-//                    type: .converted, symbol: "USDT", status: "Success", date: "6/02/25, 11:10 AM",
-//                    mainAmount: "500 USDC", price: nil, buyAmount: "+500 USDT", sellAmount: "-500 USDC",
-//                    gasFee: "$0.10", networkChainId: 10, appFee: "$0.03", address: "",
-//                    targetTx: WalletTxInfo(chainId: 10, txHash: "0x4ea4aee4e22d7b1aba7bf63136aba80322c4a417b944b622cc23c2fbe4248880"),
-//                    settlementTx: WalletTxInfo(chainId: 0, txHash: "0xf0c200811eb068de3a6adcd9d0bc3c66650ac50403f2c1931002c391d14ad56a"),
-//                    sourceTxs: [
-//                        WalletTxInfo(chainId: 56, txHash: "0xa09074a6787ec48a404ef79a53b76559f69d34577f0a8aa97c14d99d7d67033c"),
-//                        WalletTxInfo(chainId: 42161, txHash: "0x9a2210416f1cc853f9f9842728f2aaa57d1578bec58f9472f33fbbd4e8e9c805")
-//                    ]
-//                ),
-//                WalletTransaction(
-//                    type: .received, symbol: "ETH", status: "Success", date: "8/10/25, 7:23 PM",
-//                    mainAmount: "+2 ETH", price: nil, buyAmount: "+2 ETH", sellAmount: nil,
-//                    gasFee: "$0.59", networkChainId: 1, appFee: "",
-//                    address: "0x59714dE56e030071Bf96c7f7Ce500c05476f2C88",
-//                    targetTx: nil,
-//                    settlementTx: WalletTxInfo(chainId: 0, txHash: "0xf0c200811eb068de3a6adcd9d0bc3c66650ac50403f2c1931002c391d14ad56a"),
-//                    sourceTxs: [
-//                        WalletTxInfo(chainId: 1, txHash: "0x9a2210416f1cc853f9f9842728f2aaa57d1578bec58f9472f33fbbd4e8e9c805")
-//                    ]
-//                )
-//            ]
-//        }
-//    
-//    func fetchUserAccount() {
-//        self.evmAddress = "0x59714dE56e030071Bf96c7f7Ce500c05476f2C88"
-//        self.solanaAddress = "AoD9S5nuShfM5vgh9XvbR6mG1CxmkP3DNhiQX2izV4Ze"
-//        
-//        self.assets = [
-//            .init(icon: "usdc", name: "USDC", symbol: "USDC", amount: 25000, value: 25004, dayChangeUSD: 2,
-//                  networks: makeNetworks([1, 101, 56, 137, 42161, 10, 8453]),
-//                  chainSpecificBalances: [1: 10000, 101: 5000, 56: 5000, 137: 2000, 42161: 1500, 10: 1000, 8453: 503]),
-//            
-//            .init(icon: "sol", name: "Solana", symbol: "SOL", amount: 150.04, value: 30000, dayChangeUSD: 400,
-//                  networks: makeNetworks([101]),
-//                  chainSpecificBalances: [101: 150.04]),
-//            
-//            .init(icon: "btc", name: "Bitcoin", symbol: "BTC", amount: 1.323, value: 39530.24, dayChangeUSD: 800, networks: makeNetworks([101])),
-//            .init(icon: "eth", name: "Ethereum", symbol: "ETH", amount: 12.532, value: 37500, dayChangeUSD: 650,networks: makeNetworks([1, 42161, 10, 8453, 59144])),
-//            .init(icon: "bnb", name: "BNB", symbol: "BNB", amount: 2221, value: 8800, dayChangeUSD: 120, networks: makeNetworks([56])),
-//            .init(icon: "hype", name: "Hyperliquid", symbol: "HYPE", amount: 1205, value: 4200, dayChangeUSD: 38, networks: makeNetworks([999])),
-//            .init(icon: "avax", name: "Avalanche", symbol: "AVAX", amount: 12012, value: 3000, dayChangeUSD: 25, networks: makeNetworks([43114])),
-//            .init(icon: "dot", name: "Polkadot", symbol: "DOT", amount: 3503, value: 2800, dayChangeUSD: 15, networks: makeNetworks([1])),
-//            .init(icon: "uni", name: "Uniswap", symbol: "UNI", amount: 25043, value: 2000, dayChangeUSD: -50, networks: makeNetworks([1])),
-//            .init(icon: "aave", name: "Aave", symbol: "AAVE", amount: 22343, value: 2440, dayChangeUSD: -521, networks: makeNetworks([1])),
-//            .init(icon: "usdt", name: "Tether", symbol: "USDT", amount: 0.5, value: 0.50, dayChangeUSD: 0, networks: makeNetworks([1, 56, 137, 42161])),
-//            .init(icon: "arb", name: "Arbitrum", symbol: "ARB", amount: 5000, value: 5000, dayChangeUSD: 50, networks: makeNetworks([42161])),
-//            .init(icon: "op", name: "Optimism", symbol: "OP", amount: 2000, value: 3000, dayChangeUSD: 30, networks: makeNetworks([10])),
-//            .init(icon: "matic", name: "Polygon", symbol: "POL", amount: 1000, value: 400, dayChangeUSD: 10, networks: makeNetworks([137])),
-//            .init(icon: "mon", name: "Monad", symbol: "MON", amount: 1000, value: 500, dayChangeUSD: 5, networks: makeNetworks([143])),
-//            .init(icon: "mnt", name: "Mantle", symbol: "MNT", amount: 594.55, value: 300, dayChangeUSD: 2, networks: makeNetworks([5000])),
-//            .init(icon: "linea", name: "Linea", symbol: "LINEA", amount: 32.234, value: 15040, dayChangeUSD: 10, networks: makeNetworks([59144])),
-//            .init(icon: "s", name: "Sonic", symbol: "S", amount: 1323130, value: 200, dayChangeUSD: 20, networks: makeNetworks([146])),
-//            .init(icon: "bera", name: "Berachain", symbol: "BERA", amount: 586855, value: 2500, dayChangeUSD: 100, networks: makeNetworks([80094])),
-//            .init(icon: "okb", name: "X Layer", symbol: "OKB", amount: 2320, value: 1000, dayChangeUSD: 5, networks: makeNetworks([196])),
-//            .init(icon: "merlin", name: "Merlin", symbol: "MERL", amount: 2000, value: 1200, dayChangeUSD: 15,  networks: makeNetworks([4200])),
-//            .init(icon: "xpl", name: "Plasma", symbol: "PLASMA", amount: 5000, value: 100, dayChangeUSD: 0, networks: makeNetworks([9745])),
-//            .init(icon: "tslax", name: "Tesla", symbol: "TSLA", amount: 586855, value: 22200, dayChangeUSD: 100, isStock: true, networks: makeNetworks([80094])),
-//            .init(icon: "hoodx", name: "Robinhood", symbol: "HOOD", amount: 2950, value: 12300, dayChangeUSD: 5, isStock: true, networks: makeNetworks([196])),
-//            .init(icon: "mstrx", name: "MicroStrategy", symbol: "MSTR", amount: 2000, value: 12000, dayChangeUSD: 15, isStock: true, networks: makeNetworks([4200])),
-//            .init(icon: "crclx", name: "Circle", symbol: "CRCL", amount: 5000, value: 10000, dayChangeUSD: 0, isStock: true, networks: makeNetworks([9745]))
-//        
-//        ]
-//    }
-//}
+// MARK: - 5. MAIN WALLET VIEW
 
 struct Wallet: View {
     @StateObject private var viewModel = WalletViewModel()
@@ -2365,15 +2159,11 @@ struct ConvertView: View {
     
     init(assets: [WalletAsset]) {
         self.assets = assets
-        if let firstAsset = assets.first {
-            _sourceAsset = State(initialValue: assets.first(where: { $0.symbol == "USDC" }) ?? firstAsset)
-            _targetAsset = State(initialValue: assets.first(where: { $0.symbol == "ETH" }) ?? firstAsset)
-        } else {
-            let placeholder = WalletAsset(icon: "circle", name: "Loading", symbol: "---", amount: 0, value: 0, dayChangeUSD: 0, networks: [])
-            _sourceAsset = State(initialValue: placeholder)
-            _targetAsset = State(initialValue: placeholder)
-        }
+        _sourceAsset = State(initialValue: assets.first(where: { $0.symbol == "USDC" }) ?? assets[0])
+        _targetAsset = State(initialValue: assets.first(where: { $0.symbol == "USDT" }) ?? assets.first(where: { $0.symbol == "ETH" }) ?? assets[1])
     }
+
+    // ... (Your existing calculation logic remains here) ...
 
     var outputAmount: String {
         let input = cleanInputAmount
